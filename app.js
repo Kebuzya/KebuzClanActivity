@@ -4,21 +4,23 @@
 const state = {
   spreadsheetId:   null,
   clanName:        null,
-  mode:            'today',   // 'today' | 'archive'
+  mode:            'today',   // 'today' | 'lab' | 'archive'
   players:         [],
-  todayLogs:       {},        // {nick: {torg, labirint, pohod}}
+  todayLogs:       {},        // {nick: {torg, labirint, pohod, labWrong, labComment}}
   todayDate:       null,
   editedLogs:      {},        // накапливает изменения до нажатия «Сохранить»
+  filter:          '',        // поиск по нику
   archiveFromDate: null,      // строка дд.мм.гггг
   archiveToDate:   null,      // строка дд.мм.гггг
   archiveData:     [],        // данные одной даты (для режима редактирования)
   archiveGroups:   [],        // [{date, entries}] для диапазонного вида
-  archiveEdits:    {},        // {nick: {torg, labirint, pohod}}
+  archiveEdits:    {},        // {nick: {torg, labirint, pohod, labWrong, labComment, warning, warnReason}}
   archiveEditMode: false,
   confirmCb:       null,      // коллбэк для модального подтверждения
   retroDate:       null,      // null = сегодня, 'дд.мм.гггг' = ретро-режим
-  retroLogs:       {},        // {nick: {torg, labirint, pohod}} для ретро-режима
+  retroLogs:       {},        // {nick: {...}} для ретро-режима
   retroOrigLogs:   {},        // исходные значения из архива (неизменны в течение сессии)
+  modalNick:       null,      // ник, открытый в модалке лабиринта или предупреждения
 };
 
 // API
@@ -93,6 +95,12 @@ function displayToIso(displayDate) {
   return parts[2] + '-' + parts[1] + '-' + parts[0];
 }
 
+function localIso(d) {
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+}
+
 // Возвращает массив дат (дд.мм.гггг) от toStr до fromStr включительно (новые первые)
 function getDateRange(fromStr, toStr) {
   function parse(str) {
@@ -106,13 +114,47 @@ function getDateRange(fromStr, toStr) {
   var dates = [];
   var cur = new Date(to.getFullYear(), to.getMonth(), to.getDate());
   while (cur >= from && dates.length <= 31) {
-    var y = cur.getFullYear();
-    var m = String(cur.getMonth() + 1).padStart(2, '0');
-    var d = String(cur.getDate()).padStart(2, '0');
-    dates.push(d + '.' + m + '.' + y);
+    dates.push(isoToDisplay(localIso(cur)));
     cur.setDate(cur.getDate() - 1);
   }
   return dates;
+}
+
+// Отметки дня
+function emptyLog() {
+  return { torg: false, labirint: '', pohod: false, labWrong: false, labComment: '' };
+}
+
+// Штрафные ключи как число: '' считается нулём
+function keysNum(value) {
+  if (value === '' || value === null || value === undefined) return 0;
+  var num = Number(value);
+  return isNaN(num) ? 0 : num;
+}
+
+// Текущее состояние отметок игрока с учётом несохранённых правок
+function currentLog(nick) {
+  if (state.retroDate) {
+    return Object.assign(emptyLog(), state.retroLogs[nick]);
+  }
+  return Object.assign(emptyLog(), state.todayLogs[nick], state.editedLogs[nick]);
+}
+
+// Исходное состояние — база для предпросмотра счётчиков
+function origLog(nick) {
+  return state.retroDate
+    ? Object.assign(emptyLog(), state.retroOrigLogs[nick])
+    : Object.assign(emptyLog(), state.todayLogs[nick]);
+}
+
+// Единственная точка записи отметок: и таблица, и экран лабиринта, и модалки
+function setLog(nick, patch) {
+  if (state.retroDate) {
+    state.retroLogs[nick] = Object.assign(emptyLog(), state.retroLogs[nick], patch);
+  } else {
+    state.editedLogs[nick] = Object.assign(emptyLog(), state.todayLogs[nick], state.editedLogs[nick], patch);
+    scheduleAutoSave();
+  }
 }
 
 // Автосохранение
@@ -121,7 +163,7 @@ var autoSaveTimer = null;
 function scheduleAutoSave() {
   clearTimeout(autoSaveTimer);
   autoSaveTimer = setTimeout(function() {
-    if (state.mode === 'today' && Object.keys(state.editedLogs).length > 0) {
+    if (!state.retroDate && Object.keys(state.editedLogs).length > 0) {
       saveLogs(true);
     }
   }, 3 * 60 * 1000);
@@ -199,7 +241,8 @@ async function loadData() {
     state.todayDate  = logsResult.date || '';
     state.todayLogs  = logsResult.logs || {};
     state.editedLogs = {};
-    state.mode       = 'today';
+    // Экран лабиринта — часть текущего дня, из него выкидывать не надо
+    if (state.mode !== 'lab') state.mode = 'today';
     state.retroDate     = null;
     state.retroLogs     = {};
     state.retroOrigLogs = {};
@@ -222,21 +265,23 @@ async function loadData() {
 // Рендер приложения
 function renderApp() {
   el('clan-name-display').textContent = state.clanName || 'Клан';
-  el('date-display').textContent      = state.todayDate || '';
+  el('date-display').textContent      = state.retroDate || state.todayDate || '';
 
-  if (state.mode === 'today') {
-    el('today-controls').classList.remove('hidden');
-    el('archive-controls').classList.add('hidden');
-    el('btn-archive').classList.remove('hidden');
-    el('btn-today').classList.add('hidden');
-    renderPlayers();
-  } else {
-    el('today-controls').classList.add('hidden');
-    el('archive-controls').classList.remove('hidden');
-    el('btn-archive').classList.add('hidden');
-    el('btn-today').classList.remove('hidden');
-    renderArchive();
-  }
+  var isArchive = state.mode === 'archive';
+  var isLab     = state.mode === 'lab';
+
+  el('today-controls').classList.toggle('hidden', isArchive || isLab);
+  el('lab-controls').classList.toggle('hidden', !isLab);
+  el('archive-controls').classList.toggle('hidden', !isArchive);
+  el('table-toolbar').classList.toggle('hidden', isArchive);
+
+  el('btn-archive').classList.toggle('hidden', isArchive);
+  el('btn-lab').classList.toggle('hidden', isLab);
+  el('btn-today').classList.toggle('hidden', !isArchive && !isLab);
+
+  if (isArchive)   renderArchive();
+  else if (isLab)  renderLab();
+  else             renderPlayers();
 }
 
 // Ретро-режим — инициализация пикера дат
@@ -246,11 +291,8 @@ function initRetroDatePicker() {
   if (parts.length !== 3) return;
   var todayD = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
   var maxDate = new Date(todayD.getFullYear(), todayD.getMonth(), todayD.getDate() - 1);
-  var maxIso = maxDate.getFullYear() + '-' +
-    String(maxDate.getMonth() + 1).padStart(2, '0') + '-' +
-    String(maxDate.getDate()).padStart(2, '0');
   var picker = el('retro-date-picker');
-  picker.max = maxIso;
+  picker.max = localIso(maxDate);
   if (!state.retroDate) picker.value = '';
 }
 
@@ -263,13 +305,8 @@ async function enterRetroMode(isoDate) {
     state.retroLogs     = {};
     state.retroOrigLogs = {};
     (entries || []).forEach(function(entry) {
-      var log = {
-        torg:     entry.torg     || false,
-        labirint: entry.labirint || '',
-        pohod:    entry.pohod    || false,
-      };
-      state.retroLogs[entry.nick]     = log;
-      state.retroOrigLogs[entry.nick] = { torg: log.torg, labirint: log.labirint, pohod: log.pohod };
+      state.retroLogs[entry.nick]     = Object.assign(emptyLog(), entry);
+      state.retroOrigLogs[entry.nick] = Object.assign(emptyLog(), entry);
     });
     state.retroDate = displayDate;
     el('btn-add-player').classList.add('hidden');
@@ -278,7 +315,7 @@ async function enterRetroMode(isoDate) {
     el('today-controls').classList.add('retro-mode');
     el('date-display').textContent = displayDate;
     el('date-display').classList.add('retro-badge');
-    renderPlayers();
+    renderApp();
   } catch (err) {
     showToast('Ошибка загрузки: ' + err.message, 'error');
     el('retro-date-picker').value = '';
@@ -299,7 +336,7 @@ function exitRetroMode() {
   el('today-controls').classList.remove('retro-mode');
   el('date-display').textContent = state.todayDate || '';
   el('date-display').classList.remove('retro-badge');
-  renderPlayers();
+  renderApp();
 }
 
 // Ретро-режим — сохранение в архив
@@ -308,15 +345,20 @@ async function saveRetroDay() {
   showLoading();
   try {
     var result = await api('saveRetroDay', { date: state.retroDate, logs: state.retroLogs });
-    showToast('Сохранено за ' + state.retroDate + ' (' + (result.saved || 0) + ' пропусков)', 'success');
+    showToast('Сохранено за ' + state.retroDate + ' (' + (result.saved || 0) + ' записей)', 'success');
     // Обновляем список игроков, чтобы подтянуть новые значения счётчиков
     var results = await Promise.all([api('getPlayers'), api('getTodayLogs')]);
     state.players   = results[0].players  || [];
     state.clanName  = results[0].clanName || 'Клан';
     state.todayDate = results[1].date     || '';
     state.todayLogs = results[1].logs     || {};
+    // Сохранённое становится новой точкой отсчёта для предпросмотра
+    state.retroOrigLogs = {};
+    Object.keys(state.retroLogs).forEach(function(nick) {
+      state.retroOrigLogs[nick] = Object.assign(emptyLog(), state.retroLogs[nick]);
+    });
     initRetroDatePicker();
-    renderPlayers();
+    renderApp();
   } catch (err) {
     showToast('Ошибка сохранения: ' + err.message, 'error');
   } finally {
@@ -332,6 +374,13 @@ function sortPlayers(players) {
     if (aD !== bD) return aD ? -1 : 1;
     return a.nick.localeCompare(b.nick, 'ru');
   });
+}
+
+function visiblePlayers() {
+  var list = sortPlayers(state.players);
+  var filter = state.filter.trim().toLowerCase();
+  if (!filter) return list;
+  return list.filter(function(p) { return p.nick.toLowerCase().indexOf(filter) !== -1; });
 }
 
 function getRowBg(player) {
@@ -355,140 +404,127 @@ function getMissClass(count) {
   return '';
 }
 
-// Предварительный подсчёт пропусков с учётом несохранённых изменений
+// Предпросмотр счётчиков с учётом несохранённых изменений.
+// Лабиринт суммируется (штрафные ключи), торг и поход считаются по дням.
 function getPreviewSkip(player, field) {
   var skipField = field === 'torg' ? 'skipT' : field === 'labirint' ? 'skipL' : 'skipP';
-  var base      = state.todayLogs[player.nick]  || {};
-  var edits     = state.editedLogs[player.nick] || {};
-  var count     = player[skipField] || 0;
+  var count = +player[skipField] || 0;
+  var orig  = origLog(player.nick);
+  var cur   = currentLog(player.nick);
 
   if (field === 'labirint') {
-    var baseVal = base.labirint || '';
-    var curVal  = edits.labirint !== undefined ? edits.labirint : baseVal;
-    if (!baseVal && curVal)  count++;
-    if (baseVal  && !curVal) count = Math.max(0, count - 1);
-  } else {
-    // torg/pohod: true = пропуск, false = присутствовал
-    var baseMiss = !!(base[field]);
-    var curMiss  = edits[field] !== undefined ? !!(edits[field]) : baseMiss;
-    if (!baseMiss && curMiss)  count++;                          // был → пропуск
-    if (baseMiss  && !curMiss) count = Math.max(0, count - 1);  // пропуск → был
+    return Math.max(0, count + keysNum(cur.labirint) - keysNum(orig.labirint));
   }
+
+  // torg/pohod: true = пропуск, false = присутствовал
+  if (!orig[field] && cur[field]) count++;
+  if (orig[field] && !cur[field]) count = Math.max(0, count - 1);
   return count;
 }
 
-// Preview для ретро-режима: дельта от исходных значений архива
-function getPreviewSkipRetro(player, field) {
-  var skipField = field === 'torg' ? 'skipT' : field === 'labirint' ? 'skipL' : 'skipP';
-  var orig  = state.retroOrigLogs[player.nick] || {};
-  var cur   = state.retroLogs[player.nick]     || {};
-  var count = player[skipField] || 0;
+// Возраст предупреждения в днях, -1 если предупреждения нет
+function warnAgeDays(player) {
+  if (!player.warnActive || !player.warnDate) return -1;
+  var issued = new Date(player.warnDate + 'T00:00:00');
+  if (isNaN(issued.getTime())) return -1;
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.floor((today - issued) / 86400000);
+}
 
-  if (field === 'labirint') {
-    var origVal = orig.labirint || '';
-    var curVal  = cur.labirint  || '';
-    if (!origVal && curVal)  count++;
-    if (origVal  && !curVal) count = Math.max(0, count - 1);
-  } else {
-    var origMiss = !!(orig[field]);
-    var curMiss  = !!(cur[field]);
-    if (!origMiss && curMiss)  count++;
-    if (origMiss  && !curMiss) count = Math.max(0, count - 1);
-  }
+// Предупреждение за неделю: архивные + сегодняшнее, которое туда ещё не попало
+function warnDisplayCount(player) {
+  var count = +player.warnCount || 0;
+  if (player.warnActive && player.warnDate && isoToDisplay(player.warnDate) === state.todayDate) count++;
   return count;
 }
 
-// Точечное обновление ячеек пропусков в строке (без перерисовки таблицы)
-function updateMissCells(nick) {
-  var rows = el('player-list').querySelectorAll('tr[data-nick]');
-  var row = null;
-  for (var i = 0; i < rows.length; i++) {
-    if (rows[i].dataset.nick === nick) { row = rows[i]; break; }
-  }
-  if (!row) return;
-
-  var player = state.players.find(function(p) { return p.nick === nick; });
-  if (!player) return;
-
-  var cells  = row.querySelectorAll('.miss-cell');
-  var fields = ['torg', 'labirint', 'pohod'];
-  cells.forEach(function(cell, idx) {
-    var count = state.retroDate
-      ? getPreviewSkipRetro(player, fields[idx])
-      : getPreviewSkip(player, fields[idx]);
-    cell.textContent = count;
-    cell.classList.remove('miss-1', 'miss-2', 'miss-3');
-    var cls = getMissClass(count).trim();
-    if (cls) cell.classList.add(cls);
-  });
+function warnFlagHtml(player) {
+  var age = warnAgeDays(player);
+  if (age < 0) return '';
+  var cls   = age >= CONFIG.WARN_FADE_DAY ? 'warn-flag warn-stale' : 'warn-flag warn-fresh';
+  var left  = CONFIG.WARN_DAYS - age;
+  var title = 'Предупреждение от ' + isoToDisplay(player.warnDate) +
+              (player.warnReason ? ': ' + player.warnReason : '') +
+              ' (осталось дней: ' + left + ')';
+  var count = warnDisplayCount(player);
+  var badge = count > 1 ? '<sup>' + count + '</sup>' : '';
+  return '<span class="' + cls + '" title="' + esc(title) + '">🚩' + badge + '</span>';
 }
 
-var LAB_OPTIONS = ['', '0', '1', '2', 'отбил не те'];
-var LAB_LABELS  = { '': '—', '0': '0', '1': '1', '2': '2', 'отбил не те': 'отбил не те' };
+var LAB_LABEL_EMPTY = '—';
+
+function labOptions() {
+  var opts = [''];
+  for (var i = 0; i <= CONFIG.LAB_MAX_KEYS; i++) opts.push(String(i));
+  return opts;
+}
 
 function buildLabSelect(currentVal, disabled) {
-  var disAttr = disabled ? ' disabled' : '';
-  var html = '<select class="lab-select"' + disAttr + '>';
-  LAB_OPTIONS.forEach(function(v) {
+  var html = '<select class="lab-select"' + (disabled ? ' disabled' : '') + '>';
+  labOptions().forEach(function(v) {
     var sel = currentVal === v ? ' selected' : '';
-    html += '<option value="' + esc(v) + '"' + sel + '>' + esc(LAB_LABELS[v]) + '</option>';
+    html += '<option value="' + esc(v) + '"' + sel + '>' + esc(v === '' ? LAB_LABEL_EMPTY : v) + '</option>';
   });
   html += '</select>';
   return html;
 }
 
+// Компактный бейдж лабиринта в строке игрока — вместо целой колонки
+function labBadgeHtml(log) {
+  var keys  = keysNum(log.labirint);
+  var cls   = 'lab-badge' + (keys > 0 || log.labWrong ? ' lab-badge-bad' : '');
+  var text  = log.labirint === '' ? LAB_LABEL_EMPTY : String(keys);
+  var marks = (log.labWrong ? '<span class="lab-mark">⚠</span>' : '') +
+              (log.labComment ? '<span class="lab-mark">💬</span>' : '');
+  var title = 'Штрафные ключи: ' + text +
+              (log.labWrong ? ', отбивал не туда' : '') +
+              (log.labComment ? '\n' + log.labComment : '');
+  return '<button class="' + cls + '" data-action="lab" title="' + esc(title) + '">🌀 ' + text + marks + '</button>';
+}
+
+function emptyRowHtml(cols, text) {
+  return '<tr><td colspan="' + cols + '" class="empty-state">' + esc(text) + '</td></tr>';
+}
+
 function renderPlayers() {
-  var sorted = sortPlayers(state.players);
-  var rows   = '';
+  var list = visiblePlayers();
+  var rows = '';
 
-  sorted.forEach(function(player, idx) {
-    var log;
-    if (state.retroDate) {
-      // Ретро-режим: берём из retroLogs (преинициализированы из архива)
-      log = state.retroLogs[player.nick] || { torg: false, labirint: '', pohod: false };
-    } else {
-      // Сегодня: мёрджим сохранённые и несохранённые изменения
-      var base  = state.todayLogs[player.nick]  || {};
-      var edits = state.editedLogs[player.nick] || {};
-      log = {
-        torg:     edits.torg     !== undefined ? edits.torg     : (base.torg     || false),
-        labirint: edits.labirint !== undefined ? edits.labirint : (base.labirint || ''),
-        pohod:    edits.pohod    !== undefined ? edits.pohod    : (base.pohod    || false),
-      };
-    }
-
+  list.forEach(function(player, idx) {
+    var log      = currentLog(player.nick);
     var bg       = getRowBg(player);
     var bgStyle  = bg ? ' style="background:' + bg + '"' : '';
     // В ретро-режиме отпуск не блокирует редактирование (прошлая дата)
     var disabled = state.retroDate ? false : player.onVacation;
     var disAttr  = disabled ? ' disabled' : '';
-    var roleBadge = player.role === 'Заместитель'
-      ? '<span class="role-badge">Зам</span>'
-      : '';
-    var vacClass = player.onVacation ? ' vacation-active' : '';
+    var roleBadge = player.role === 'Заместитель' ? '<span class="role-badge">Зам</span>' : '';
+    var vkDot     = player.inVkGroup === false ? '<span class="vk-dot" title="Нет в группе ВК"></span>' : '';
+    var vacClass  = player.onVacation ? ' vacation-active' : '';
 
     rows += '<tr data-nick="' + esc(player.nick) + '"' + bgStyle + '>';
-    var vkDot = player.inVkGroup === false ? '<span class="vk-dot" title="Нет в группе ВК"></span>' : '';
     rows += '<td class="num-cell">' + (idx + 1) + '</td>';
-    rows += '<td class="nick-cell">' + roleBadge + vkDot + '<span class="nick-text">' + esc(player.nick) + '</span></td>';
+    rows += '<td class="nick-cell">' + roleBadge + vkDot + warnFlagHtml(player) +
+            '<span class="nick-text">' + esc(player.nick) + '</span></td>';
     rows += '<td class="miss-cell miss-border-l' + getMissClass(player.skipT) + '">' + (player.skipT || 0) + '</td>';
     rows += '<td class="miss-cell' + getMissClass(player.skipL) + '">' + (player.skipL || 0) + '</td>';
     rows += '<td class="miss-cell miss-border-r' + getMissClass(player.skipP) + '">' + (player.skipP || 0) + '</td>';
     rows += '<td class="check-cell"><input type="checkbox" class="torg-cb"' + (log.torg ? ' checked' : '') + disAttr + '></td>';
-    rows += '<td class="lab-cell">' + buildLabSelect(log.labirint, disabled) + '</td>';
+    rows += '<td class="lab-cell">' + labBadgeHtml(log) + '</td>';
     rows += '<td class="check-cell"><input type="checkbox" class="pohod-cb"' + (log.pohod ? ' checked' : '') + disAttr + '></td>';
     rows += '<td class="actions-cell">';
     if (!state.retroDate) {
-      rows += '<button class="icon-btn" data-action="edit"    title="Редактировать">✏️</button>';
+      rows += '<button class="icon-btn" data-action="edit"     title="Редактировать">✏️</button>';
+      rows += '<button class="icon-btn' + (player.warnActive ? ' warn-active' : '') + '" data-action="warning" title="Предупреждение">🚩</button>';
       rows += '<button class="icon-btn' + vacClass + '" data-action="vacation" title="Отпуск">🏖️</button>';
-      rows += '<button class="icon-btn" data-action="delete"  title="Удалить">❌</button>';
+      rows += '<button class="icon-btn" data-action="delete"   title="Удалить">❌</button>';
     }
     rows += '</td>';
     rows += '</tr>';
   });
 
   if (!rows) {
-    rows = '<tr><td colspan="9" class="empty-state">Нет игроков. Добавьте первого участника.</td></tr>';
+    rows = emptyRowHtml(9, state.filter ? 'Никто не найден' : 'Нет игроков. Добавьте первого участника.');
   }
 
   var html =
@@ -497,7 +533,7 @@ function renderPlayers() {
     '<th class="num-th">#</th>' +
     '<th class="nick-th">Игрок</th>' +
     '<th class="miss-th miss-border-l" title="Пропуски торга">Т↓</th>' +
-    '<th class="miss-th" title="Пропуски лабиринта">Л↓</th>' +
+    '<th class="miss-th" title="Штрафные ключи лабиринта за 7 дней">Л↓</th>' +
     '<th class="miss-th miss-border-r" title="Пропуски похода">П↓</th>' +
     '<th class="check-th">Торг</th>' +
     '<th class="lab-th">Лабиринт</th>' +
@@ -515,6 +551,8 @@ function renderPlayers() {
     tbody.addEventListener('change', onTodayChange);
     tbody.addEventListener('click',  onTodayClick);
   }
+
+  renderSummary();
 }
 
 function onTodayChange(e) {
@@ -523,40 +561,15 @@ function onTodayChange(e) {
   var nick = row.dataset.nick;
   if (!nick) return;
 
-  if (state.retroDate) {
-    // Ретро-режим: пишем в retroLogs
-    if (!state.retroLogs[nick]) {
-      state.retroLogs[nick] = { torg: false, labirint: '', pohod: false };
-    }
-    if (e.target.classList.contains('torg-cb')) {
-      state.retroLogs[nick].torg = e.target.checked;
-    } else if (e.target.classList.contains('lab-select')) {
-      state.retroLogs[nick].labirint = e.target.value;
-    } else if (e.target.classList.contains('pohod-cb')) {
-      state.retroLogs[nick].pohod = e.target.checked;
-    }
-    updateMissCells(nick);
+  if (e.target.classList.contains('torg-cb')) {
+    setLog(nick, { torg: e.target.checked });
+  } else if (e.target.classList.contains('pohod-cb')) {
+    setLog(nick, { pohod: e.target.checked });
+  } else {
     return;
   }
 
-  var base = state.todayLogs[nick] || {};
-  if (!state.editedLogs[nick]) {
-    state.editedLogs[nick] = {
-      torg:     base.torg     || false,
-      labirint: base.labirint || '',
-      pohod:    base.pohod    || false,
-    };
-  }
-
-  if (e.target.classList.contains('torg-cb')) {
-    state.editedLogs[nick].torg = e.target.checked;
-  } else if (e.target.classList.contains('lab-select')) {
-    state.editedLogs[nick].labirint = e.target.value;
-  } else if (e.target.classList.contains('pohod-cb')) {
-    state.editedLogs[nick].pohod = e.target.checked;
-  }
-  updateMissCells(nick);
-  scheduleAutoSave();
+  updateRowPreview(nick);
 }
 
 function onTodayClick(e) {
@@ -569,6 +582,230 @@ function onTodayClick(e) {
   if (action === 'edit')     openEditModal(nick);
   if (action === 'delete')   openDeleteConfirm(nick);
   if (action === 'vacation') openVacationModal(nick);
+  if (action === 'warning')  openWarningModal(nick);
+  if (action === 'lab')      openLabModal(nick);
+}
+
+// Точечное обновление строки без перерисовки таблицы
+function updateRowPreview(nick) {
+  var rows = el('player-list').querySelectorAll('tr[data-nick]');
+  var row = null;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].dataset.nick === nick) { row = rows[i]; break; }
+  }
+  if (!row) { renderSummary(); return; }
+
+  var player = state.players.find(function(p) { return p.nick === nick; });
+  if (!player) return;
+
+  var cells  = row.querySelectorAll('.miss-cell');
+  var fields = ['torg', 'labirint', 'pohod'];
+  cells.forEach(function(cell, idx) {
+    var count = getPreviewSkip(player, fields[idx]);
+    cell.textContent = count;
+    cell.classList.remove('miss-1', 'miss-2', 'miss-3');
+    var cls = getMissClass(count).trim();
+    if (cls) cell.classList.add(cls);
+  });
+
+  var labCell = row.querySelector('.lab-cell');
+  if (labCell) labCell.innerHTML = labBadgeHtml(currentLog(nick));
+
+  renderSummary();
+}
+
+// Сводка дня
+function renderSummary() {
+  var box = el('day-summary');
+  if (!box) return;
+
+  if (state.players.length === 0) { box.textContent = ''; return; }
+
+  var torg = 0, pohod = 0, keys = 0, warns = 0;
+  state.players.forEach(function(player) {
+    var log = currentLog(player.nick);
+    if (log.torg)  torg++;
+    if (log.pohod) pohod++;
+    keys += keysNum(log.labirint);
+    if (player.warnActive) warns++;
+  });
+
+  var shown = visiblePlayers().length;
+  var parts = [];
+  parts.push(state.filter ? ('показано ' + shown + ' из ' + state.players.length)
+                          : (state.players.length + ' игроков'));
+  parts.push('🛒 ' + torg);
+  parts.push('🌀 ' + keys);
+  parts.push('🚩 ' + pohod);
+  if (warns > 0) parts.push('⚠ ' + warns);
+
+  box.textContent = parts.join(' · ');
+}
+
+// Экран лабиринта
+function renderLab() {
+  var list = visiblePlayers();
+  var rows = '';
+
+  list.forEach(function(player) {
+    var log      = currentLog(player.nick);
+    var disabled = state.retroDate ? false : player.onVacation;
+    var disAttr  = disabled ? ' disabled' : '';
+    var bg       = getRowBg(player);
+    var bgStyle  = bg ? ' style="background:' + bg + '"' : '';
+    var keysCls  = keysNum(log.labirint) > 0 ? ' lab-keys-bad' : '';
+
+    rows += '<tr data-nick="' + esc(player.nick) + '"' + bgStyle + '>';
+    rows += '<td class="nick-cell">' + warnFlagHtml(player) +
+            '<span class="nick-text">' + esc(player.nick) + '</span></td>';
+    rows += '<td class="miss-cell' + getMissClass(player.skipL) + '">' + (player.skipL || 0) + '</td>';
+    rows += '<td class="lab-cell' + keysCls + '">' + buildLabSelect(log.labirint, disabled) + '</td>';
+    rows += '<td class="check-cell"><input type="checkbox" class="lab-wrong-cb"' +
+            (log.labWrong ? ' checked' : '') + disAttr + '></td>';
+    rows += '<td class="lab-comment-cell"><input type="text" class="lab-comment-input" ' +
+            'placeholder="замечание" value="' + esc(log.labComment) + '"' + disAttr + '></td>';
+    rows += '</tr>';
+  });
+
+  if (!rows) {
+    rows = emptyRowHtml(5, state.filter ? 'Никто не найден' : 'Нет игроков.');
+  }
+
+  var html =
+    '<div class="lab-hint">Ставим <b>штрафные</b> ключи: не отбитые плюс отбитые не туда. ' +
+    '0 или «' + LAB_LABEL_EMPTY + '» — претензий нет.</div>' +
+    '<div class="table-wrapper"><table class="player-table lab-table">' +
+    '<thead><tr>' +
+    '<th class="nick-th">Игрок</th>' +
+    '<th class="miss-th" title="Штрафные ключи за 7 дней">Σ 7дн</th>' +
+    '<th class="lab-th">Ключи</th>' +
+    '<th class="check-th">Не туда</th>' +
+    '<th class="lab-comment-th">Замечание</th>' +
+    '</tr></thead>' +
+    '<tbody>' + rows + '</tbody>' +
+    '</table></div>';
+
+  el('player-list').innerHTML = html;
+
+  var tbody = el('player-list').querySelector('tbody');
+  if (tbody) {
+    tbody.addEventListener('change', onLabChange);
+    tbody.addEventListener('input',  onLabChange);
+  }
+
+  renderSummary();
+}
+
+function onLabChange(e) {
+  var row  = e.target.closest('tr');
+  if (!row) return;
+  var nick = row.dataset.nick;
+  if (!nick) return;
+
+  if (e.target.classList.contains('lab-select')) {
+    setLog(nick, { labirint: e.target.value });
+    row.querySelector('.lab-cell').classList.toggle('lab-keys-bad', keysNum(e.target.value) > 0);
+  } else if (e.target.classList.contains('lab-wrong-cb')) {
+    setLog(nick, { labWrong: e.target.checked });
+  } else if (e.target.classList.contains('lab-comment-input')) {
+    setLog(nick, { labComment: e.target.value });
+  } else {
+    return;
+  }
+
+  var missCell = row.querySelector('.miss-cell');
+  if (missCell) {
+    var player = state.players.find(function(p) { return p.nick === nick; });
+    if (player) {
+      var count = getPreviewSkip(player, 'labirint');
+      missCell.textContent = count;
+      missCell.classList.remove('miss-1', 'miss-2', 'miss-3');
+      var cls = getMissClass(count).trim();
+      if (cls) missCell.classList.add(cls);
+    }
+  }
+
+  renderSummary();
+}
+
+// Модалка лабиринта на одного игрока
+function openLabModal(nick) {
+  var player = state.players.find(function(p) { return p.nick === nick; });
+  if (!player) return;
+  var log = currentLog(nick);
+
+  state.modalNick = nick;
+  el('lab-modal-nick').textContent = nick;
+  el('lab-keys').innerHTML = labOptions().map(function(v) {
+    return '<option value="' + esc(v) + '"' + (log.labirint === v ? ' selected' : '') + '>' +
+           esc(v === '' ? LAB_LABEL_EMPTY : v) + '</option>';
+  }).join('');
+  el('lab-wrong').checked = log.labWrong;
+  el('lab-comment').value = log.labComment;
+
+  showModal('modal-lab');
+}
+
+function submitLab() {
+  var nick = state.modalNick;
+  if (!nick) return;
+
+  setLog(nick, {
+    labirint:   el('lab-keys').value,
+    labWrong:   el('lab-wrong').checked,
+    labComment: el('lab-comment').value.trim(),
+  });
+
+  state.modalNick = null;
+  closeModal();
+  updateRowPreview(nick);
+}
+
+// Модалка предупреждения
+function openWarningModal(nick) {
+  var player = state.players.find(function(p) { return p.nick === nick; });
+  if (!player) return;
+
+  state.modalNick = nick;
+  el('warning-modal-nick').textContent = nick;
+  el('warning-active').checked = player.warnActive;
+  el('warning-date').value     = player.warnDate || localIso(new Date());
+  el('warning-reason').value   = player.warnReason || '';
+  el('warning-date').disabled   = !player.warnActive;
+  el('warning-reason').disabled = !player.warnActive;
+
+  var count = warnDisplayCount(player);
+  el('warning-count').textContent = count > 0
+    ? 'Предупреждений за 7 дней: ' + count
+    : 'За последние 7 дней предупреждений не было';
+
+  showModal('modal-warning');
+}
+
+async function submitWarning() {
+  var nick   = state.modalNick;
+  if (!nick) return;
+  var active = el('warning-active').checked;
+  var date   = el('warning-date').value;
+  var reason = el('warning-reason').value.trim();
+
+  if (active && !date) {
+    showToast('Укажите дату выдачи', 'error');
+    return;
+  }
+
+  state.modalNick = null;
+  closeModal();
+  showLoading();
+  try {
+    await api('setWarning', { nick, active, date, reason });
+    await loadData();
+    showToast(active ? 'Предупреждение выдано' : 'Предупреждение снято', 'success');
+  } catch (err) {
+    showToast('Ошибка: ' + err.message, 'error');
+  } finally {
+    hideLoading();
+  }
 }
 
 // Текущий день - сохранение
@@ -588,6 +825,11 @@ async function saveLogs(isAuto) {
     showToast('Ошибка сохранения: ' + err.message, 'error');
     hideLoading();
   }
+}
+
+function saveCurrent() {
+  if (state.retroDate) saveRetroDay();
+  else saveLogs();
 }
 
 // Добавление игрока
@@ -704,7 +946,7 @@ async function submitVacation() {
     state.players[playerIdx].returnDate = active ? isoToDisplay(returnDate) : '';
   }
   closeModal();
-  renderPlayers();
+  renderApp();
 
   showLoading();
   try {
@@ -719,7 +961,7 @@ async function submitVacation() {
     // Откатываем оптимистичное обновление
     if (playerIdx >= 0 && prevPlayer) {
       state.players[playerIdx] = prevPlayer;
-      renderPlayers();
+      renderApp();
     }
     showToast('Ошибка: ' + err.message, 'error');
     hideLoading();
@@ -766,12 +1008,6 @@ function enterArchiveMode() {
   var toDate   = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
   var fromDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 7);
 
-  function localIso(d) {
-    return d.getFullYear() + '-' +
-      String(d.getMonth() + 1).padStart(2, '0') + '-' +
-      String(d.getDate()).padStart(2, '0');
-  }
-
   var todayIso = localIso(today);
   el('archive-date-from').max   = todayIso;
   el('archive-date-to').max     = todayIso;
@@ -800,13 +1036,6 @@ async function loadArchiveRange(fromDate, toDate) {
 
     state.archiveEdits = {};
 
-    // Для режима редактирования (только одна дата)
-    if (dates.length === 1) {
-      state.archiveData = results[0] || [];
-    } else {
-      state.archiveData = [];
-    }
-
     // Для режима редактирования: данные самой свежей даты (toDate = dates[0])
     state.archiveData = results[0] || [];
 
@@ -828,17 +1057,28 @@ function buildArchiveTable(entries, edit) {
     var e = Object.assign({}, entry, state.archiveEdits[entry.nick] || {});
 
     rows += '<tr data-nick="' + esc(entry.nick) + '">';
-    rows += '<td class="nick-cell"><span class="nick-text">' + esc(entry.nick) + '</span></td>';
 
     if (edit) {
+      rows += '<td class="nick-cell"><span class="nick-text">' + esc(entry.nick) + '</span></td>';
       rows += '<td class="check-cell"><input type="checkbox" class="torg-cb"' + (e.torg ? ' checked' : '') + '></td>';
       rows += '<td class="lab-cell">' + buildLabSelect(e.labirint, false) + '</td>';
+      rows += '<td class="check-cell"><input type="checkbox" class="lab-wrong-cb"' + (e.labWrong ? ' checked' : '') + '></td>';
+      rows += '<td class="lab-comment-cell"><input type="text" class="lab-comment-input" value="' + esc(e.labComment || '') + '"></td>';
       rows += '<td class="check-cell"><input type="checkbox" class="pohod-cb"' + (e.pohod ? ' checked' : '') + '></td>';
+      rows += '<td class="check-cell"><input type="checkbox" class="warn-cb"' + (e.warning ? ' checked' : '') + '></td>';
     } else {
-      // 8.2: torg/pohod: true=пропуск→красный+❌, false=присутствовал→пусто
-      rows += '<td class="check-cell' + (entry.torg  ? ' arch-miss' : '') + '">' + (entry.torg  ? '❌' : '') + '</td>';
-      rows += '<td class="lab-cell'   + (entry.labirint ? ' arch-miss' : '') + '">' + esc(entry.labirint || '') + '</td>';
-      rows += '<td class="check-cell' + (entry.pohod ? ' arch-miss' : '') + '">' + (entry.pohod ? '❌' : '') + '</td>';
+      // torg/pohod: true = пропуск → красный ❌, false = присутствовал → пусто
+      var warnMark = e.warning
+        ? '<span class="warn-flag warn-fresh" title="' + esc(e.warnReason || 'Предупреждение') + '">🚩</span>'
+        : '';
+      var keys = keysNum(e.labirint);
+      rows += '<td class="nick-cell">' + warnMark + '<span class="nick-text">' + esc(entry.nick) + '</span></td>';
+      rows += '<td class="check-cell' + (e.torg ? ' arch-miss' : '') + '">' + (e.torg ? '❌' : '') + '</td>';
+      rows += '<td class="lab-cell' + (keys > 0 ? ' arch-miss' : '') + '">' + (e.labirint === '' ? '' : esc(String(keys))) + '</td>';
+      rows += '<td class="check-cell' + (e.labWrong ? ' arch-miss' : '') + '">' + (e.labWrong ? '⚠' : '') + '</td>';
+      rows += '<td class="lab-comment-cell">' + esc(e.labComment || '') + '</td>';
+      rows += '<td class="check-cell' + (e.pohod ? ' arch-miss' : '') + '">' + (e.pohod ? '❌' : '') + '</td>';
+      rows += '<td class="check-cell">' + (e.warning ? '🚩' : '') + '</td>';
     }
 
     rows += '</tr>';
@@ -848,8 +1088,11 @@ function buildArchiveTable(entries, edit) {
     '<thead><tr>' +
     '<th class="nick-th">Игрок</th>' +
     '<th class="check-th">Торг</th>' +
-    '<th class="lab-th">Лабиринт</th>' +
+    '<th class="lab-th">Ключи</th>' +
+    '<th class="check-th">Не туда</th>' +
+    '<th class="lab-comment-th">Замечание</th>' +
     '<th class="check-th">Поход</th>' +
+    '<th class="check-th">Предупр.</th>' +
     '</tr></thead>' +
     '<tbody>' + rows + '</tbody>' +
     '</table></div>';
@@ -866,20 +1109,21 @@ function renderArchive() {
   var isSingle = getDateRange(state.archiveFromDate, state.archiveToDate).length === 1;
 
   if (isSingle && state.archiveEditMode) {
-    // Режим редактирования одной даты
     container.innerHTML = buildArchiveTable(state.archiveData, true);
     var tbody = container.querySelector('tbody');
-    if (tbody) tbody.addEventListener('change', onArchiveChange);
+    if (tbody) {
+      tbody.addEventListener('change', onArchiveChange);
+      tbody.addEventListener('input',  onArchiveChange);
+    }
     return;
   }
 
   if (isSingle) {
-    // Одна дата — читаем
     container.innerHTML = buildArchiveTable(state.archiveGroups[0].entries, false);
     return;
   }
 
-  // Диапазон — группы по датам (8.1)
+  // Диапазон — группы по датам
   var html = '';
   state.archiveGroups.forEach(function(group) {
     html += '<div class="archive-group">';
@@ -900,14 +1144,14 @@ function onArchiveChange(e) {
   if (!state.archiveEdits[nick]) {
     state.archiveEdits[nick] = Object.assign({}, original);
   }
+  var edit = state.archiveEdits[nick];
 
-  if (e.target.classList.contains('torg-cb')) {
-    state.archiveEdits[nick].torg = e.target.checked;
-  } else if (e.target.classList.contains('lab-select')) {
-    state.archiveEdits[nick].labirint = e.target.value;
-  } else if (e.target.classList.contains('pohod-cb')) {
-    state.archiveEdits[nick].pohod = e.target.checked;
-  }
+  if (e.target.classList.contains('torg-cb'))              edit.torg       = e.target.checked;
+  else if (e.target.classList.contains('lab-select'))      edit.labirint   = e.target.value;
+  else if (e.target.classList.contains('lab-wrong-cb'))    edit.labWrong   = e.target.checked;
+  else if (e.target.classList.contains('lab-comment-input')) edit.labComment = e.target.value;
+  else if (e.target.classList.contains('pohod-cb'))        edit.pohod      = e.target.checked;
+  else if (e.target.classList.contains('warn-cb'))         edit.warning    = e.target.checked;
 }
 
 function enterArchiveEditMode() {
@@ -955,13 +1199,10 @@ async function saveArchiveChanges() {
   try {
     for (var i = 0; i < nicks.length; i++) {
       var nick = nicks[i];
-      var vals = state.archiveEdits[nick];
       await api('updateArchive', {
-        date:     state.archiveFromDate,
-        nick:     nick,
-        torg:     vals.torg,
-        labirint: vals.labirint,
-        pohod:    vals.pohod,
+        date:  state.archiveFromDate,
+        nick:  nick,
+        entry: state.archiveEdits[nick],
       });
     }
 
@@ -1046,9 +1287,19 @@ document.addEventListener('DOMContentLoaded', function() {
   // Шапка
   el('btn-archive').addEventListener('click', enterArchiveMode);
 
+  el('btn-lab').addEventListener('click', function() {
+    state.mode = 'lab';
+    renderApp();
+  });
+
   el('btn-today').addEventListener('click', function() {
-    state.mode = 'today';
-    loadData();
+    if (state.mode === 'lab') {
+      state.mode = 'today';
+      renderApp();
+    } else {
+      state.mode = 'today';
+      loadData();
+    }
   });
 
   el('btn-leave').addEventListener('click', function() {
@@ -1062,11 +1313,26 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Панель текущего дня
   el('btn-add-player').addEventListener('click', openAddModal);
-  el('btn-save').addEventListener('click', function() {
-    if (state.retroDate) saveRetroDay();
-    else saveLogs();
-  });
+  el('btn-save').addEventListener('click', saveCurrent);
   el('btn-refresh').addEventListener('click', loadData);
+
+  // Панель лабиринта
+  el('btn-lab-save').addEventListener('click', saveCurrent);
+  el('btn-lab-refresh').addEventListener('click', loadData);
+
+  // Поиск по нику
+  el('search-input').addEventListener('input', function(e) {
+    state.filter = e.target.value;
+    if (state.mode === 'lab') renderLab();
+    else renderPlayers();
+  });
+
+  el('search-clear').addEventListener('click', function() {
+    state.filter = '';
+    el('search-input').value = '';
+    if (state.mode === 'lab') renderLab();
+    else renderPlayers();
+  });
 
   // Ретро-режим
   el('retro-date-picker').addEventListener('change', function(e) {
@@ -1132,6 +1398,28 @@ document.addEventListener('DOMContentLoaded', function() {
   el('vacation-active').addEventListener('change', function(e) {
     el('vacation-return-date').disabled = !e.target.checked;
     if (!e.target.checked) el('vacation-return-date').value = '';
+  });
+
+  // Модальное окно - лабиринт
+  el('btn-lab-cancel').addEventListener('click', function() {
+    state.modalNick = null;
+    closeModal();
+  });
+  el('btn-lab-submit').addEventListener('click', submitLab);
+
+  // Модальное окно - предупреждение
+  el('btn-warning-cancel').addEventListener('click', function() {
+    state.modalNick = null;
+    closeModal();
+  });
+  el('btn-warning-submit').addEventListener('click', submitWarning);
+
+  el('warning-active').addEventListener('change', function(e) {
+    el('warning-date').disabled   = !e.target.checked;
+    el('warning-reason').disabled = !e.target.checked;
+    if (e.target.checked && !el('warning-date').value) {
+      el('warning-date').value = localIso(new Date());
+    }
   });
 
   // Модальное окно - подтверждение

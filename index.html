@@ -92,6 +92,7 @@
       <span id="date-display" class="date-badge"></span>
     </div>
     <div class="header-right">
+      <button id="btn-lab" class="btn btn-header">🌀 Лабиринт</button>
       <button id="btn-archive" class="btn btn-header">📋 Архив</button>
       <button id="btn-today" class="btn btn-header hidden">📅 Сегодня</button>
       <button id="btn-theme" class="btn btn-header btn-icon" title="Тёмная тема">🌙</button>
@@ -111,6 +112,12 @@
     </div>
   </div>
 
+  <!-- Панель управления — лабиринт -->
+  <div id="lab-controls" class="controls-bar hidden">
+    <button id="btn-lab-save" class="btn btn-primary">💾 Сохранить</button>
+    <button id="btn-lab-refresh" class="btn btn-ghost" title="Обновить">🔄</button>
+  </div>
+
   <!-- Панель управления — архив -->
   <div id="archive-controls" class="controls-bar hidden">
     <div class="date-range-group">
@@ -122,6 +129,22 @@
     <button id="btn-edit-archive" class="btn btn-outline hidden">✏️ Редактировать</button>
     <button id="btn-save-archive" class="btn btn-primary hidden">💾 Сохранить</button>
     <button id="btn-cancel-archive" class="btn btn-ghost hidden">✖ Отменить</button>
+  </div>
+
+  <!-- Поиск и сводка дня -->
+  <div id="table-toolbar">
+    <div class="search-group">
+      <input
+        type="search"
+        id="search-input"
+        class="search-input"
+        placeholder="🔍 Поиск по нику..."
+        autocomplete="off"
+        spellcheck="false"
+      >
+      <button id="search-clear" class="btn btn-ghost btn-icon" title="Сбросить поиск">✖</button>
+    </div>
+    <div id="day-summary" class="day-summary"></div>
   </div>
 
   <!-- Список игроков -->
@@ -237,6 +260,68 @@
     <div class="modal-footer">
       <button class="btn btn-ghost" id="btn-vacation-cancel">Отмена</button>
       <button class="btn btn-primary" id="btn-vacation-submit">Сохранить</button>
+    </div>
+  </div>
+
+  <!-- Лабиринт -->
+  <div id="modal-lab" class="modal hidden">
+    <div class="modal-header">
+      <h3 class="modal-title">🌀 Лабиринт — <span id="lab-modal-nick"></span></h3>
+      <button class="modal-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-hint">
+        Ставим <b>штрафные</b> ключи: не отбитые плюс отбитые не туда.
+        0 или «—» — претензий нет.
+      </p>
+      <div class="form-group">
+        <label for="lab-keys" class="form-label">Штрафные ключи</label>
+        <select id="lab-keys" class="form-input"></select>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-label">
+          <input type="checkbox" id="lab-wrong">
+          <span>Отбивал ключи не туда</span>
+        </label>
+      </div>
+      <div class="form-group">
+        <label for="lab-comment" class="form-label">Замечание</label>
+        <input type="text" id="lab-comment" class="form-input" placeholder="Что именно пошло не так" autocomplete="off">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="btn-lab-cancel">Отмена</button>
+      <button class="btn btn-primary" id="btn-lab-submit">Применить</button>
+    </div>
+  </div>
+
+  <!-- Предупреждение -->
+  <div id="modal-warning" class="modal hidden">
+    <div class="modal-header">
+      <h3 class="modal-title">🚩 Предупреждение — <span id="warning-modal-nick"></span></h3>
+      <button class="modal-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="checkbox-label">
+          <input type="checkbox" id="warning-active">
+          <span>Предупреждение выдано</span>
+        </label>
+        <span class="form-hint" id="warning-count"></span>
+      </div>
+      <div class="form-group">
+        <label for="warning-date" class="form-label">Дата выдачи</label>
+        <input type="date" id="warning-date" class="form-input" disabled>
+        <span class="form-hint">Флаг висит 7 дней и снимается сам</span>
+      </div>
+      <div class="form-group">
+        <label for="warning-reason" class="form-label">Причина</label>
+        <input type="text" id="warning-reason" class="form-input" placeholder="За что выдано" autocomplete="off" disabled>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="btn-warning-cancel">Отмена</button>
+      <button class="btn btn-primary" id="btn-warning-submit">Сохранить</button>
     </div>
   </div>
 
