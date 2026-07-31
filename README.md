@@ -6,7 +6,7 @@
 [![GitHub Pages](https://img.shields.io/badge/hosting-GitHub%20Pages-1a237e)](https://kebuzya.github.io/KebuzClanActivity/)
 [![Backend](https://img.shields.io/badge/backend-Google%20Apps%20Script-2e7d32)](https://developers.google.com/apps-script)
 [![База данных](https://img.shields.io/badge/%D0%B1%D0%B0%D0%B7%D0%B0-Google%20Sheets-1b7a43)](https://sheets.google.com)
-[![Сборка](https://img.shields.io/badge/%D1%81%D0%B1%D0%BE%D1%80%D0%BA%D0%B0-%D0%BD%D0%B5%20%D0%BD%D1%83%D0%B6%D0%BD%D0%B0-455a64)]()
+![Сборка](https://img.shields.io/badge/%D1%81%D0%B1%D0%BE%D1%80%D0%BA%D0%B0-%D0%BD%D0%B5%20%D0%BD%D1%83%D0%B6%D0%BD%D0%B0-455a64)
 
 ### ➡️ [Открыть приложение](https://kebuzya.github.io/KebuzClanActivity/)
 
